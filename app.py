@@ -5,20 +5,25 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 import datetime
+import urllib.request
+import os
 
 st.set_page_config(page_title="Privacy Exam Monitor", layout="wide")
 
 st.title("🛡️ Privacy-Aware Exam Integrity Monitor")
 st.caption("Event-Level Explainability & Local Real-time Redaction")
 
+# Ensure cascade file is guaranteed to exist locally
+CASCADE_FILE = "haarcascade_frontalface_default.xml"
+if not os.path.exists(CASCADE_FILE):
+    url = "https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_frontalface_default.xml"
+    urllib.request.urlretrieve(url, CASCADE_FILE)
+
 @st.cache_resource
 def load_models():
-    # Load YOLO Nano
-    model = YOLO("yolov8n.pt")
-    face_cascade = cv2.CascadeClassifier(
-        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-    )
-    return model, face_cascade
+    yolo = YOLO("yolov8n.pt")
+    face_cascade = cv2.CascadeClassifier(CASCADE_FILE)
+    return yolo, face_cascade
 
 yolo_model, face_cascade = load_models()
 
@@ -28,95 +33,106 @@ RTC_CONFIG = RTCConfiguration(
 
 class ExamVideoProcessor(VideoProcessorBase):
     def __init__(self):
-        self.frame_idx = 0
-        self.last_status = "Status: Clear"
-        self.last_color = (0, 255, 0)
-        self.cached_boxes = []
+        self.frame_count = 0
+        self.status_text = "Status: Clear"
+        self.status_color = (0, 255, 0)
+        self.detected_phones = []
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-        img = frame.to_ndarray(format="bgr24")
-        self.frame_idx += 1
-        h, w, _ = img.shape
-        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+        try:
+            img = frame.to_ndarray(format="bgr24")
+            self.frame_count += 1
+            h, w, _ = img.shape
+            timestamp = datetime.datetime.now().strftime("%H:%M:%S")
 
-        # 1. Fast Face Detection on downscaled image
-        scale = 0.5
-        small_gray = cv2.resize(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), (0, 0), fx=scale, fy=scale)
-        faces = face_cascade.detectMultiScale(small_gray, scaleFactor=1.2, minNeighbors=4, minSize=(30, 30))
-        face_count = len(faces)
+            # 1. Real-Time Face Anonymization (Runs on every frame)
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            # Downscale for instant cascade detection
+            small_gray = cv2.resize(gray, (0, 0), fx=0.5, fy=0.5)
+            faces = face_cascade.detectMultiScale(small_gray, scaleFactor=1.2, minNeighbors=3, minSize=(25, 25))
 
-        # Apply Real-time Facial Redaction
-        for (fx, fy, fw, fh) in faces:
-            x1 = int(fx / scale)
-            y1 = int(fy / scale)
-            x2 = int((fx + fw) / scale)
-            y2 = int((fy + fh) / scale)
+            face_count = len(faces)
 
-            roi = img[y1:y2, x1:x2]
-            if roi.size > 0:
-                # Fast box blur for privacy protection
-                img[y1:y2, x1:x2] = cv2.blur(roi, (31, 31))
+            for (fx, fy, fw, fh) in faces:
+                # Upscale coordinates back to actual frame size
+                x1, y1 = fx * 2, fy * 2
+                x2, y2 = (fx + fw) * 2, (fy + fh) * 2
 
-            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 255), 2)
+                # Enforce boundaries
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(w, x2), min(h, y2)
 
-        # 2. Object Detection (Skipped across frames to prevent CPU lag)
-        if self.frame_idx % 10 == 0:
-            self.cached_boxes = []
-            status = "Status: Clear"
-            color = (0, 255, 0)
+                # Privacy Obfuscation (Gaussian/Box blur)
+                face_roi = img[y1:y2, x1:x2]
+                if face_roi.size > 0:
+                    img[y1:y2, x1:x2] = cv2.blur(face_roi, (41, 41))
 
-            if face_count == 0:
-                status = "ALERT: Candidate Missing (No Face)"
-                color = (0, 0, 255)
-            elif face_count > 1:
-                status = f"ALERT: Multiple Faces Detected ({face_count})"
-                color = (0, 0, 255)
+                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 255), 2)
 
-            # Fast 160px inference for phone detection
-            tiny_frame = cv2.resize(img, (160, 160))
-            results = yolo_model(tiny_frame, verbose=False, conf=0.35)
+            # 2. Object & Absence Detection (Evaluated once every 6 frames)
+            if self.frame_count % 6 == 0:
+                self.detected_phones = []
+                current_status = "Status: Clear"
+                current_color = (0, 255, 0)
 
-            for r in results:
-                for box in r.boxes:
-                    if int(box.cls[0].item()) == 67:  # Cell phone
-                        bx = box.xyxy[0].cpu().numpy()
-                        sx1 = int(bx[0] * (w / 160.0))
-                        sy1 = int(bx[1] * (h / 160.0))
-                        sx2 = int(bx[2] * (w / 160.0))
-                        sy2 = int(bx[3] * (h / 160.0))
-                        conf = float(box.conf[0].item())
-                        self.cached_boxes.append((sx1, sy1, sx2, sy2, conf))
-                        status = "ALERT: Prohibited Device (Phone)"
-                        color = (0, 0, 255)
+                if face_count == 0:
+                    current_status = "ALERT: Candidate Missing (No Face)"
+                    current_color = (0, 0, 255)
+                elif face_count > 1:
+                    current_status = f"ALERT: Multiple Faces Detected ({face_count})"
+                    current_color = (0, 0, 255)
 
-            self.last_status = status
-            self.last_color = color
+                # Nano YOLO inference on compact frame
+                blob = cv2.resize(img, (160, 160))
+                preds = yolo_model(blob, verbose=False, conf=0.35)
 
-        # Draw cached phone boundaries
-        for (x1, y1, x2, y2, conf) in self.cached_boxes:
-            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 2)
-            cv2.putText(img, f"Phone {conf:.2f}", (x1, max(20, y1 - 10)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                for r in preds:
+                    for box in r.boxes:
+                        if int(box.cls[0].item()) == 67:  # Cell phone
+                            bx = box.xyxy[0].cpu().numpy()
+                            bx_full = [
+                                int(bx[0] * (w / 160.0)),
+                                int(bx[1] * (h / 160.0)),
+                                int(bx[2] * (w / 160.0)),
+                                int(bx[3] * (h / 160.0))
+                            ]
+                            conf = float(box.conf[0].item())
+                            self.detected_phones.append((bx_full, conf))
+                            current_status = "ALERT: Prohibited Device (Phone)"
+                            current_color = (0, 0, 255)
 
-        # Visual Diagnostic Overlay
-        cv2.rectangle(img, (0, 0), (w, 40), (20, 20, 20), -1)
-        cv2.putText(img, f"[{timestamp}] {self.last_status}", (10, 26),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, self.last_color, 2)
-        cv2.putText(img, "Privacy Active: Face Redacted", (10, h - 15),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
+                self.status_text = current_status
+                self.status_color = current_color
 
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
+            # Draw cached phone bounding boxes
+            for (bx, conf) in self.detected_phones:
+                cv2.rectangle(img, (bx[0], bx[1]), (bx[2], bx[3]), (0, 0, 255), 3)
+                cv2.putText(img, f"Phone: {conf:.2f}", (bx[0], max(30, bx[1] - 10)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
+            # Explainability HUD Banner
+            cv2.rectangle(img, (0, 0), (w, 45), (30, 30, 30), -1)
+            cv2.putText(img, f"[{timestamp}] {self.status_text}", (12, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, self.status_color, 2)
+            cv2.putText(img, "Privacy Mode: Real-time Biometric Masking", (12, h - 15),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
+
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+        except Exception as e:
+            # Fallback keeps stream alive even if an individual frame drops
+            return frame
 
 col1, col2 = st.columns([2, 1])
 
 with col1:
     st.subheader("Live Secure Proctoring Stream")
     webrtc_streamer(
-        key="exam-stream-v2",
+        key="exam-secure-monitor",
         mode=WebRtcMode.SENDRECV,
         rtc_configuration=RTC_CONFIG,
         video_processor_factory=ExamVideoProcessor,
-        media_stream_constraints={"video": {"width": 360, "height": 270, "frameRate": 15}, "audio": False},
+        media_stream_constraints={"video": {"width": 480, "height": 360}, "audio": False},
         async_processing=True,
     )
 
