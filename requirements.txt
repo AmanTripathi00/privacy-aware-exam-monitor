@@ -1,8 +1,7 @@
 streamlit
 streamlit-webrtc
 opencv-python-headless
-mediapipe
 ultralytics
-av
 numpy
-
+pandas
+av
