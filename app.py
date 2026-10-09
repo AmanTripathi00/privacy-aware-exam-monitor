@@ -318,3 +318,30 @@ if photo_files:
         st.rerun()
 else:
     st.info("No prohibited evidence screenshots recorded yet. (Click '🔄 Sync Live Stream Data & Refresh Gallery' above during video streaming to update).")
+
+from streamlit_drawable_canvas import st_canvas
+
+# Whiteboard / Scratchpad Section
+st.markdown("---")
+st.subheader("📝 Interactive Whiteboard / Proctor Notes Canvas")
+
+col_tool, col_size, col_color = st.columns(3)
+with col_tool:
+    drawing_mode = st.selectbox(
+        "Tool:", ("freedraw", "line", "rect", "circle", "transform")
+    )
+with col_size:
+    stroke_width = st.slider("Brush Size: ", 1, 25, 3)
+with col_color:
+    stroke_color = st.color_picker("Brush Color: ", "#FF0000")
+
+canvas_result = st_canvas(
+    fill_color="rgba(255, 165, 0, 0.3)",
+    stroke_width=stroke_width,
+    stroke_color=stroke_color,
+    background_color="#FFFFFF",
+    height=350,
+    width=700,
+    drawing_mode=drawing_mode,
+    key="proctor_whiteboard",
+)

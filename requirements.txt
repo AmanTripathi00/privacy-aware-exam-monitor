@@ -5,3 +5,5 @@ ultralytics
 numpy
 pandas
 av
+echo "streamlit-drawable-canvas" >> requirements.txt
+streamlit-drawable-canvas
